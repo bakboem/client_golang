@@ -19,7 +19,10 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -66,7 +69,7 @@ func TestLabelCheck(t *testing.T) {
 		},
 		"all labels used with an invalid const label name": {
 			varLabels:     []string{"code", "method"},
-			constLabels:   []string{"in-valid", "bar"},
+			constLabels:   []string{"in\x80valid", "bar"},
 			curriedLabels: []string{"dings", "bums"},
 			dynamicLabels: []string{"dyn", "amics"},
 			ok:            false,
@@ -120,14 +123,14 @@ func TestLabelCheck(t *testing.T) {
 			ok:            false,
 		},
 		"invalid name and otherwise empty": {
-			metricName:    "in-valid",
+			metricName:    "in\x80valid",
 			varLabels:     []string{},
 			constLabels:   []string{},
 			curriedLabels: []string{},
 			ok:            false,
 		},
 		"invalid name with all the otherwise valid labels": {
-			metricName:    "in-valid",
+			metricName:    "in\x80valid",
 			varLabels:     []string{"code", "method"},
 			constLabels:   []string{"foo", "bar"},
 			curriedLabels: []string{"dings", "bums"},
@@ -324,7 +327,7 @@ func TestLabels(t *testing.T) {
 				panic("metric partitioned with non-supported labels for this test")
 			}
 		}
-		return
+		return gotCode, gotMethod
 	}
 	equalLabels := func(gotLabels, wantLabels prometheus.Labels) bool {
 		if len(gotLabels) != len(wantLabels) {
@@ -418,7 +421,7 @@ func TestMiddlewareAPI(t *testing.T) {
 		_, _ = w.Write([]byte("OK"))
 	})
 
-	r, _ := http.NewRequest("GET", "www.example.com", nil)
+	r, _ := http.NewRequest(http.MethodGet, "www.example.com", nil)
 	w := httptest.NewRecorder()
 	chain.ServeHTTP(w, r)
 
@@ -432,11 +435,102 @@ func TestMiddlewareAPI_WithExemplars(t *testing.T) {
 		_, _ = w.Write([]byte("OK"))
 	}, WithExemplarFromContext(func(_ context.Context) prometheus.Labels { return exemplar }))
 
-	r, _ := http.NewRequest("GET", "www.example.com", nil)
+	r, _ := http.NewRequest(http.MethodGet, "www.example.com", nil)
 	w := httptest.NewRecorder()
 	chain.ServeHTTP(w, r)
 
 	assetMetricAndExemplars(t, reg, 5, labelsToLabelPair(exemplar))
+}
+
+// TestMiddlewareAPI_SummaryWithExemplars is a regression test for
+// https://github.com/prometheus/client_golang/issues/1258. SummaryVec is a
+// valid prometheus.ObserverVec but the underlying summary does not implement
+// prometheus.ExemplarObserver — only histograms can carry exemplars in the
+// Prometheus exposition format. The instrumentation helpers must therefore
+// fall back to a plain Observe when given a non-ExemplarObserver, instead of
+// panicking with a failed type assertion at request time.
+func TestMiddlewareAPI_SummaryWithExemplars(t *testing.T) {
+	reg := prometheus.NewRegistry()
+
+	durationVec := prometheus.NewSummaryVec(
+		prometheus.SummaryOpts{
+			Name:       "request_duration_seconds",
+			Help:       "A summary of request durations.",
+			Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+		},
+		[]string{"code", "method"},
+	)
+	reg.MustRegister(durationVec)
+
+	exemplar := prometheus.Labels{"traceID": "abc123"}
+	handler := InstrumentHandlerDuration(
+		durationVec,
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("OK"))
+		}),
+		WithExemplarFromContext(func(_ context.Context) prometheus.Labels { return exemplar }),
+	)
+
+	r, _ := http.NewRequest(http.MethodGet, "www.example.com", nil)
+	w := httptest.NewRecorder()
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			t.Fatalf("InstrumentHandlerDuration panicked with a SummaryVec observer: %v", rec)
+		}
+	}()
+	handler.ServeHTTP(w, r)
+}
+
+// nonExemplarObserver implements prometheus.Observer but deliberately omits
+// ObserveWithExemplar, so it does not satisfy prometheus.ExemplarObserver.
+type nonExemplarObserver struct {
+	last float64
+}
+
+func (o *nonExemplarObserver) Observe(v float64) { o.last = v }
+
+// nonExemplarCounter implements prometheus.Counter but deliberately omits
+// AddWithExemplar, so it does not satisfy prometheus.ExemplarAdder.
+type nonExemplarCounter struct {
+	last float64
+}
+
+func (c *nonExemplarCounter) Desc() *prometheus.Desc           { return nil }
+func (c *nonExemplarCounter) Write(*dto.Metric) error          { return nil }
+func (c *nonExemplarCounter) Describe(chan<- *prometheus.Desc) {}
+func (c *nonExemplarCounter) Collect(chan<- prometheus.Metric) {}
+func (c *nonExemplarCounter) Inc()                             { c.last = 1 }
+func (c *nonExemplarCounter) Add(v float64)                    { c.last = v }
+
+func TestObserveWithExemplar_NonExemplarObserverFallsBack(t *testing.T) {
+	obs := &nonExemplarObserver{}
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			t.Fatalf("observeWithExemplar panicked for non-ExemplarObserver: %v", rec)
+		}
+	}()
+	observeWithExemplar(obs, 1.5, prometheus.Labels{"traceID": "abc"})
+
+	if obs.last != 1.5 {
+		t.Fatalf("expected fallback Observe(1.5), got Observe(%v)", obs.last)
+	}
+}
+
+func TestAddWithExemplar_NonExemplarAdderFallsBack(t *testing.T) {
+	c := &nonExemplarCounter{}
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			t.Fatalf("addWithExemplar panicked for non-ExemplarAdder: %v", rec)
+		}
+	}()
+	addWithExemplar(c, 2.5, prometheus.Labels{"traceID": "abc"})
+
+	if c.last != 2.5 {
+		t.Fatalf("expected fallback Add(2.5), got Add(%v)", c.last)
+	}
 }
 
 func TestInstrumentTimeToFirstWrite(t *testing.T) {
@@ -521,6 +615,60 @@ func TestInterfaceUpgrade(t *testing.T) {
 	if _, ok := d.(http.Hijacker); ok {
 		t.Error("delegator unexpectedly implements http.Hijacker")
 	}
+}
+
+// Regression test against https://github.com/prometheus/client_golang/pull/1318
+func TestInstrumentHandlerLabelFromCtxConcurrent(t *testing.T) {
+	const (
+		workers           = 32
+		requestsPerWorker = 200
+	)
+
+	counter := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "test_requests_total",
+			Help: "A counter for requests to the wrapped handler.",
+		},
+		[]string{"dyn"},
+	)
+	histogram := prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "test_request_duration_seconds",
+			Help: "A histogram of latencies for requests to the wrapped handler.",
+		},
+		[]string{"dyn"},
+	)
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(counter, histogram)
+
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	dyn := WithLabelFromCtx("dyn", func(_ context.Context) string {
+		return "v"
+	})
+
+	chain := InstrumentHandlerCounter(
+		counter,
+		InstrumentHandlerDuration(histogram, next, dyn),
+		dyn,
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < requestsPerWorker; j++ {
+				req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+				rec := httptest.NewRecorder()
+				chain.ServeHTTP(rec, req)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func ExampleInstrumentHandlerDuration() {

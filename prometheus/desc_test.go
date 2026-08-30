@@ -17,14 +17,74 @@ import (
 	"testing"
 )
 
-func TestNewDescInvalidLabelValues(t *testing.T) {
+func TestNewDescInvalidConstLabelValues(t *testing.T) {
+	labelValue := "\xFF"
 	desc := NewDesc(
 		"sample_label",
 		"sample label",
 		nil,
-		Labels{"a": "\xFF"},
+		Labels{"a": labelValue},
 	)
-	if desc.err == nil {
-		t.Errorf("NewDesc: expected error because: %s", desc.err)
+	if desc.Err() == nil {
+		t.Errorf("NewDesc: expected error because const label value is invalid: %s", labelValue)
+	}
+}
+
+func TestNewDescInvalidVariableLabelName(t *testing.T) {
+	labelValue := "__label__"
+	desc := NewDesc(
+		"sample_label",
+		"sample label",
+		[]string{labelValue},
+		Labels{"a": "b"},
+	)
+	if desc.Err() == nil {
+		t.Errorf("NewDesc: expected error because variable label name is invalid: %s", labelValue)
+	}
+}
+
+func TestNewDescNilLabelValues(t *testing.T) {
+	desc := NewDesc(
+		"sample_label",
+		"sample label",
+		nil,
+		nil,
+	)
+	if desc.Err() != nil {
+		t.Errorf("NewDesc: unexpected error: %s", desc.Err())
+	}
+}
+
+func TestNewDescWithNilLabelValues_String(t *testing.T) {
+	desc := NewDesc(
+		"sample_label",
+		"sample label",
+		nil,
+		nil,
+	)
+	if desc.String() != `Desc{fqName: "sample_label", help: "sample label", unit: "", constLabels: {}, variableLabels: {}}` {
+		t.Errorf("String: unexpected output: %s", desc.String())
+	}
+}
+
+func TestNewInvalidDesc_String(t *testing.T) {
+	desc := NewInvalidDesc(
+		nil,
+	)
+	if desc.String() != `Desc{fqName: "", help: "", unit: "", constLabels: {}, variableLabels: {}}` {
+		t.Errorf("String: unexpected output: %s", desc.String())
+	}
+}
+
+func TestNewDescWithUnit_String(t *testing.T) {
+	desc := V2.NewDesc(
+		"sample_metric_bytes",
+		"sample metric with unit",
+		UnconstrainedLabels(nil),
+		nil,
+		WithUnit("bytes"),
+	)
+	if desc.String() != `Desc{fqName: "sample_metric_bytes", help: "sample metric with unit", unit: "bytes", constLabels: {}, variableLabels: {}}` {
+		t.Errorf("String: unexpected output:\ngot:  %s\nwant: %s", desc.String(), desc.String())
 	}
 }

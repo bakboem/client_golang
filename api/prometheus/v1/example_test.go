@@ -28,9 +28,11 @@ import (
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 )
 
+const DemoPrometheusURL = "https://demo.prometheus.io:443"
+
 func ExampleAPI_query() {
 	client, err := api.NewClient(api.Config{
-		Address: "http://demo.robustperception.io:9090",
+		Address: DemoPrometheusURL,
 	})
 	if err != nil {
 		fmt.Printf("Error creating client: %v\n", err)
@@ -40,7 +42,7 @@ func ExampleAPI_query() {
 	v1api := v1.NewAPI(client)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	result, warnings, err := v1api.Query(ctx, "up", time.Now(), v1.WithTimeout(5*time.Second))
+	result, warnings, infos, err := v1api.Query(ctx, "up", time.Now(), v1.WithTimeout(5*time.Second))
 	if err != nil {
 		fmt.Printf("Error querying Prometheus: %v\n", err)
 		os.Exit(1)
@@ -48,12 +50,15 @@ func ExampleAPI_query() {
 	if len(warnings) > 0 {
 		fmt.Printf("Warnings: %v\n", warnings)
 	}
+	if len(infos) > 0 {
+		fmt.Printf("Infos: %v\n", infos)
+	}
 	fmt.Printf("Result:\n%v\n", result)
 }
 
 func ExampleAPI_queryRange() {
 	client, err := api.NewClient(api.Config{
-		Address: "http://demo.robustperception.io:9090",
+		Address: DemoPrometheusURL,
 	})
 	if err != nil {
 		fmt.Printf("Error creating client: %v\n", err)
@@ -68,13 +73,16 @@ func ExampleAPI_queryRange() {
 		End:   time.Now(),
 		Step:  time.Minute,
 	}
-	result, warnings, err := v1api.QueryRange(ctx, "rate(prometheus_tsdb_head_samples_appended_total[5m])", r, v1.WithTimeout(5*time.Second))
+	result, warnings, infos, err := v1api.QueryRange(ctx, "rate(prometheus_tsdb_head_samples_appended_total[5m])", r, v1.WithTimeout(5*time.Second))
 	if err != nil {
 		fmt.Printf("Error querying Prometheus: %v\n", err)
 		os.Exit(1)
 	}
 	if len(warnings) > 0 {
 		fmt.Printf("Warnings: %v\n", warnings)
+	}
+	if len(infos) > 0 {
+		fmt.Printf("Infos: %v\n", infos)
 	}
 	fmt.Printf("Result:\n%v\n", result)
 }
@@ -104,7 +112,7 @@ func (u userAgentRoundTripper) RoundTrip(r *http.Request) (*http.Response, error
 
 func ExampleAPI_queryRangeWithUserAgent() {
 	client, err := api.NewClient(api.Config{
-		Address:      "http://demo.robustperception.io:9090",
+		Address:      DemoPrometheusURL,
 		RoundTripper: userAgentRoundTripper{name: "Client-Golang", rt: api.DefaultRoundTripper},
 	})
 	if err != nil {
@@ -120,7 +128,7 @@ func ExampleAPI_queryRangeWithUserAgent() {
 		End:   time.Now(),
 		Step:  time.Minute,
 	}
-	result, warnings, err := v1api.QueryRange(ctx, "rate(prometheus_tsdb_head_samples_appended_total[5m])", r)
+	result, warnings, infos, err := v1api.QueryRange(ctx, "rate(prometheus_tsdb_head_samples_appended_total[5m])", r)
 	if err != nil {
 		fmt.Printf("Error querying Prometheus: %v\n", err)
 		os.Exit(1)
@@ -128,12 +136,15 @@ func ExampleAPI_queryRangeWithUserAgent() {
 	if len(warnings) > 0 {
 		fmt.Printf("Warnings: %v\n", warnings)
 	}
+	if len(infos) > 0 {
+		fmt.Printf("Infos: %v\n", infos)
+	}
 	fmt.Printf("Result:\n%v\n", result)
 }
 
 func ExampleAPI_queryRangeWithBasicAuth() {
 	client, err := api.NewClient(api.Config{
-		Address: "http://demo.robustperception.io:9090",
+		Address: DemoPrometheusURL,
 		// We can use amazing github.com/prometheus/common/config helper!
 		RoundTripper: config.NewBasicAuthRoundTripper(
 			config.NewInlineSecret("me"),
@@ -154,7 +165,7 @@ func ExampleAPI_queryRangeWithBasicAuth() {
 		End:   time.Now(),
 		Step:  time.Minute,
 	}
-	result, warnings, err := v1api.QueryRange(ctx, "rate(prometheus_tsdb_head_samples_appended_total[5m])", r)
+	result, warnings, infos, err := v1api.QueryRange(ctx, "rate(prometheus_tsdb_head_samples_appended_total[5m])", r)
 	if err != nil {
 		fmt.Printf("Error querying Prometheus: %v\n", err)
 		os.Exit(1)
@@ -162,12 +173,15 @@ func ExampleAPI_queryRangeWithBasicAuth() {
 	if len(warnings) > 0 {
 		fmt.Printf("Warnings: %v\n", warnings)
 	}
+	if len(infos) > 0 {
+		fmt.Printf("Infos: %v\n", infos)
+	}
 	fmt.Printf("Result:\n%v\n", result)
 }
 
 func ExampleAPI_queryRangeWithAuthBearerToken() {
 	client, err := api.NewClient(api.Config{
-		Address: "http://demo.robustperception.io:9090",
+		Address: DemoPrometheusURL,
 		// We can use amazing github.com/prometheus/common/config helper!
 		RoundTripper: config.NewAuthorizationCredentialsRoundTripper(
 			"Bearer",
@@ -188,7 +202,7 @@ func ExampleAPI_queryRangeWithAuthBearerToken() {
 		End:   time.Now(),
 		Step:  time.Minute,
 	}
-	result, warnings, err := v1api.QueryRange(ctx, "rate(prometheus_tsdb_head_samples_appended_total[5m])", r)
+	result, warnings, infos, err := v1api.QueryRange(ctx, "rate(prometheus_tsdb_head_samples_appended_total[5m])", r)
 	if err != nil {
 		fmt.Printf("Error querying Prometheus: %v\n", err)
 		os.Exit(1)
@@ -196,12 +210,26 @@ func ExampleAPI_queryRangeWithAuthBearerToken() {
 	if len(warnings) > 0 {
 		fmt.Printf("Warnings: %v\n", warnings)
 	}
+	if len(infos) > 0 {
+		fmt.Printf("Infos: %v\n", infos)
+	}
 	fmt.Printf("Result:\n%v\n", result)
 }
 
-func ExampleAPI_series() {
+func ExampleAPI_queryRangeWithAuthBearerTokenHeadersRoundTripper() {
 	client, err := api.NewClient(api.Config{
-		Address: "http://demo.robustperception.io:9090",
+		Address: DemoPrometheusURL,
+		// We can use amazing github.com/prometheus/common/config helper!
+		RoundTripper: config.NewHeadersRoundTripper(
+			&config.Headers{
+				Headers: map[string]config.Header{
+					"Authorization": {
+						Values: []string{"Bearer secret"},
+					},
+				},
+			},
+			api.DefaultRoundTripper,
+		),
 	})
 	if err != nil {
 		fmt.Printf("Error creating client: %v\n", err)
@@ -211,7 +239,38 @@ func ExampleAPI_series() {
 	v1api := v1.NewAPI(client)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	lbls, warnings, err := v1api.Series(ctx, []string{
+	r := v1.Range{
+		Start: time.Now().Add(-time.Hour),
+		End:   time.Now(),
+		Step:  time.Minute,
+	}
+	result, warnings, infos, err := v1api.QueryRange(ctx, "rate(prometheus_tsdb_head_samples_appended_total[5m])", r)
+	if err != nil {
+		fmt.Printf("Error querying Prometheus: %v\n", err)
+		os.Exit(1)
+	}
+	if len(warnings) > 0 {
+		fmt.Printf("Warnings: %v\n", warnings)
+	}
+	if len(infos) > 0 {
+		fmt.Printf("Infos: %v\n", infos)
+	}
+	fmt.Printf("Result:\n%v\n", result)
+}
+
+func ExampleAPI_series() {
+	client, err := api.NewClient(api.Config{
+		Address: DemoPrometheusURL,
+	})
+	if err != nil {
+		fmt.Printf("Error creating client: %v\n", err)
+		os.Exit(1)
+	}
+
+	v1api := v1.NewAPI(client)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	lbls, warnings, infos, err := v1api.Series(ctx, []string{
 		"{__name__=~\"scrape_.+\",job=\"node\"}",
 		"{__name__=~\"scrape_.+\",job=\"prometheus\"}",
 	}, time.Now().Add(-time.Hour), time.Now())
@@ -221,6 +280,9 @@ func ExampleAPI_series() {
 	}
 	if len(warnings) > 0 {
 		fmt.Printf("Warnings: %v\n", warnings)
+	}
+	if len(infos) > 0 {
+		fmt.Printf("Infos: %v\n", infos)
 	}
 	fmt.Println("Result:")
 	for _, lbl := range lbls {

@@ -27,6 +27,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +38,7 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+	"go.uber.org/goleak"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -713,7 +716,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 		}
 		writer := httptest.NewRecorder()
 		handler := promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{})
-		request, _ := http.NewRequest("GET", "/", nil)
+		request, _ := http.NewRequest(http.MethodGet, "/", nil)
 		for key, value := range scenario.headers {
 			request.Header.Add(key, value)
 		}
@@ -1075,7 +1078,12 @@ test_summary_count{name="foo"} 2
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpfile.Name())
+	// Close the file before WriteToTextfile: on Windows, os.Rename fails
+	// with "Access is denied" if the target path is held open by another
+	// handle. Name() is safe to call after Close() — it returns the stored
+	// path string, not a file descriptor.
+	tmpfile.Close()
+	t.Cleanup(func() { os.Remove(tmpfile.Name()) })
 
 	if err := prometheus.WriteToTextfile(tmpfile.Name(), registry); err != nil {
 		t.Fatal(err)
@@ -1282,7 +1290,7 @@ func ExampleRegistry_grouping() {
 				ConstLabels: prometheus.Labels{
 					// Generate a label unique to this worker so its metric doesn't
 					// collide with the metrics from other workers.
-					"worker_id": fmt.Sprintf("%d", workerID),
+					"worker_id": strconv.Itoa(workerID),
 				},
 			})
 			workerReg.MustRegister(workTime)
@@ -1302,6 +1310,55 @@ func (co *customCollector) Describe(_ chan<- *prometheus.Desc) {}
 
 func (co *customCollector) Collect(ch chan<- prometheus.Metric) {
 	co.collectFunc(ch)
+}
+
+// TestCollectorOnMetricPanic ensures that if a collector panics while collecting a metric,
+// the panic is recovered and the error is returned by Gather. It also checks that the metric
+// collected before the panic is still present in the gathered metrics. Additionally,
+// it verifies that if a collector does not panic, Gather returns the collected metrics without error.
+func TestCollectorOnMetricPanic(t *testing.T) {
+	reg := prometheus.NewRegistry()
+
+	desc := prometheus.NewDesc("metric_a", "", nil, nil)
+	metric := prometheus.MustNewConstMetric(desc, prometheus.CounterValue, 1)
+	timestamp := time.Now()
+
+	panicCollector := &customCollector{
+		collectFunc: func(ch chan<- prometheus.Metric) {
+			ch <- prometheus.NewMetricWithTimestamp(timestamp, metric)
+			panic("test panic message") // Panic during metric collection
+		},
+	}
+	reg.MustRegister(panicCollector)
+
+	mfs, err := reg.Gather()
+	if err == nil {
+		t.Error("metric should return error instead of nil")
+	}
+
+	// Check if metric_a is there
+	if len(mfs) != 1 || mfs[0].GetName() != "metric_a" {
+		t.Error("expected metric_a to be present in the gathered metrics")
+	}
+	if !strings.Contains(err.Error(), "test panic message") {
+		t.Errorf("expected panic message in error, got: %v", err)
+	}
+
+	reg = prometheus.NewRegistry()
+	desc = prometheus.NewDesc("metric_b", "", nil, nil)
+	metric = prometheus.MustNewConstMetric(desc, prometheus.CounterValue, 1)
+	timestamp = time.Now()
+
+	nonPanicCollector := &customCollector{
+		collectFunc: func(ch chan<- prometheus.Metric) {
+			ch <- prometheus.NewMetricWithTimestamp(timestamp, metric)
+		},
+	}
+	reg.MustRegister(nonPanicCollector)
+	_, err2 := reg.Gather()
+	if err2 != nil {
+		t.Error("metric should not return error:", err2)
+	}
 }
 
 // TestCheckMetricConsistency
@@ -1337,4 +1394,29 @@ func TestCheckMetricConsistency(t *testing.T) {
 		t.Error("metric validation should return an error")
 	}
 	reg.Unregister(invalidCollector)
+}
+
+func TestGatherDoesNotLeakGoroutines(t *testing.T) {
+	// Use goleak to verify that no unexpected goroutines are leaked during the test.
+	defer goleak.VerifyNone(t)
+
+	// Create a new Prometheus registry without any default collectors.
+	reg := prometheus.NewRegistry()
+
+	// Register 100 simple Gauge metrics with distinct names and constant labels.
+	for i := 0; i < 100; i++ {
+		reg.MustRegister(prometheus.NewGauge(prometheus.GaugeOpts{
+			Name:        "test_metric_" + string(rune(i)),
+			Help:        "Test metric",
+			ConstLabels: prometheus.Labels{"id": string(rune(i))},
+		}))
+	}
+
+	// Call Gather repeatedly to simulate stress and check for potential goroutine leaks.
+	for i := 0; i < 1000; i++ {
+		_, err := reg.Gather()
+		if err != nil {
+			t.Fatalf("unexpected error from Gather: %v", err)
+		}
+	}
 }

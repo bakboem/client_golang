@@ -21,7 +21,9 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"runtime/metrics"
+	"strings"
 	"sync"
 	"testing"
 
@@ -146,7 +148,7 @@ func TestGoCollector_ExposedMetrics(t *testing.T) {
 	}
 }
 
-var sink interface{}
+var sink any
 
 func TestBatchHistogram(t *testing.T) {
 	goMetrics := collectGoMetrics(t, internal.GoCollectorOptions{
@@ -269,12 +271,16 @@ func TestMemStatsEquivalence(t *testing.T) {
 		samplesMap[descs[i].Name] = &samples[i]
 	}
 
-	// Force a GC cycle to try to reach a clean slate.
-	runtime.GC()
+	// Reach a stable slate and hold it for a single measurement window.
+	// FreeOSMemory runs a GC and returns freed memory to the OS, leaving the
+	// background scavenger nothing to release; disabling GC for the window
+	// keeps msReal and msFake observing the same runtime state. Without this,
+	// HeapReleased could drift between the two reads and fail the comparison.
+	debug.FreeOSMemory()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
 
-	// Populate msReal.
+	// Populate msReal, then msFake back-to-back within the frozen window.
 	runtime.ReadMemStats(&msReal)
-	// Populate msFake and hope that no GC happened in between (:
 	metrics.Read(samples)
 
 	memStatsFromRM(&msFake, samplesMap)
@@ -299,7 +305,7 @@ func TestMemStatsEquivalence(t *testing.T) {
 		case reflect.Uint64:
 			vr := fr.Interface().(uint64)
 			vf := ff.Interface().(uint64)
-			if float64(vr-vf)/float64(vf) > 0.05 {
+			if math.Abs(float64(vr)-float64(vf))/float64(vf) > 0.05 {
 				t.Errorf("wrong value for %s: got %d, want %d", typ.Field(i).Name, vf, vr)
 			}
 		}
@@ -410,5 +416,46 @@ func TestGoCollectorConcurrency(t *testing.T) {
 			c.Collect(ch)
 			close(ch)
 		}()
+	}
+}
+
+func TestGoCollectorRuntimeMetricsUnit(t *testing.T) {
+	goMetrics := collectGoMetrics(t, internal.GoCollectorOptions{
+		RuntimeMetricRules: []internal.GoCollectorRule{
+			{Matcher: regexp.MustCompile("/.*")},
+		},
+	})
+
+	descMap := make(map[string]*Desc)
+	for _, m := range goMetrics {
+		descMap[m.Desc().fqName] = m.Desc()
+	}
+
+	testCases := []struct {
+		fqName       string
+		expectedUnit string
+	}{
+		{"go_gc_heap_allocs_bytes_total", "bytes"},
+		{"go_gc_heap_frees_bytes_total", "bytes"},
+		{"go_sched_goroutines_goroutines", "goroutines"},
+		{"go_gc_gomemlimit_bytes", "bytes"},
+		{"go_cpu_classes_gc_mark_assist_cpu_seconds_total", "cpu_seconds"},
+		{"go_gc_cycles_total_gc_cycles_total", "gc_cycles"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.fqName, func(t *testing.T) {
+			desc, ok := descMap[tc.fqName]
+			if !ok {
+				t.Skipf("metric %s not found, may not be available in this Go version", tc.fqName)
+				return
+			}
+
+			descStr := desc.String()
+			expectedUnitStr := `unit: "` + tc.expectedUnit + `"`
+			if !strings.Contains(descStr, expectedUnitStr) {
+				t.Errorf("expected Desc to contain %s, got: %s", expectedUnitStr, descStr)
+			}
+		})
 	}
 }

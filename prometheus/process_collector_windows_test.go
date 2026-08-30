@@ -15,11 +15,13 @@ package prometheus
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"regexp"
 	"testing"
 
 	"github.com/prometheus/common/expfmt"
+	"golang.org/x/sys/windows"
 )
 
 func TestWindowsProcessCollector(t *testing.T) {
@@ -51,17 +53,15 @@ func TestWindowsProcessCollector(t *testing.T) {
 		regexp.MustCompile("\nprocess_cpu_seconds_total [0-9]"),
 		regexp.MustCompile("\nprocess_max_fds [1-9]"),
 		regexp.MustCompile("\nprocess_open_fds [1-9]"),
-		regexp.MustCompile("\nprocess_virtual_memory_max_bytes (-1|[1-9])"),
 		regexp.MustCompile("\nprocess_virtual_memory_bytes [1-9]"),
 		regexp.MustCompile("\nprocess_resident_memory_bytes [1-9]"),
-		regexp.MustCompile("\nprocess_start_time_seconds [0-9.]{10,}"),
+		regexp.MustCompile("\nprocess_start_time_seconds [1-9]"),
 		regexp.MustCompile("\nfoobar_process_cpu_seconds_total [0-9]"),
 		regexp.MustCompile("\nfoobar_process_max_fds [1-9]"),
 		regexp.MustCompile("\nfoobar_process_open_fds [1-9]"),
-		regexp.MustCompile("\nfoobar_process_virtual_memory_max_bytes (-1|[1-9])"),
 		regexp.MustCompile("\nfoobar_process_virtual_memory_bytes [1-9]"),
 		regexp.MustCompile("\nfoobar_process_resident_memory_bytes [1-9]"),
-		regexp.MustCompile("\nfoobar_process_start_time_seconds [0-9.]{10,}"),
+		regexp.MustCompile("\nfoobar_process_start_time_seconds [1-9]"),
 	} {
 		if !re.Match(buf.Bytes()) {
 			t.Errorf("want body to match %s\n%s", re, buf.String())
@@ -115,5 +115,42 @@ func TestWindowsDescribeAndCollectAlignment(t *testing.T) {
 		if !definedDescs[desc] {
 			t.Errorf("Metric %s collected but not described", desc)
 		}
+	}
+}
+
+func TestWindowsProcessCollectorUsesPidFn(t *testing.T) {
+	origOpenProcess := openProcess
+	origCloseHandle := closeHandle
+	origGetProcessTimes := getProcessTimes
+	defer func() {
+		openProcess = origOpenProcess
+		closeHandle = origCloseHandle
+		getProcessTimes = origGetProcessTimes
+	}()
+
+	const wantPID = 4242
+	var gotPID uint32
+
+	openProcess = func(desiredAccess uint32, inheritHandle bool, processID uint32) (windows.Handle, error) {
+		gotPID = processID
+		return windows.Handle(1), nil
+	}
+	closeHandle = func(handle windows.Handle) error {
+		return nil
+	}
+	getProcessTimes = func(handle windows.Handle, creationTime, exitTime, kernelTime, userTime *windows.Filetime) error {
+		return errors.New("sentinel")
+	}
+
+	collector := &processCollector{
+		pidFn:        func() (int, error) { return wantPID, nil },
+		reportErrors: true,
+	}
+
+	ch := make(chan Metric, 1)
+	collector.processCollect(ch)
+
+	if gotPID != wantPID {
+		t.Fatalf("openProcess called with pid %d, want %d", gotPID, wantPID)
 	}
 }

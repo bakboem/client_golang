@@ -11,31 +11,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-include .bingo/Variables.mk
 include Makefile.common
 
+BUF := $(FIRST_GOPATH)/bin/buf
+BUF_VERSION ?= v1.39.0
+
+$(BUF):
+	go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
+
+.PHONY: deps
+deps:
+	$(MAKE) common-deps
+	cd exp && $(GO) mod tidy && $(GO) mod download
+
 .PHONY: test
-test: deps common-test
+test: deps common-test test-exp
 
 .PHONY: test-short
-test-short: deps common-test-short
+test-short: deps common-test-short test-exp-short
 
-# Overriding Makefile.common check_license target to add
-# dagger paths
-.PHONY: common-check_license
-common-check_license:
-	@echo ">> checking license header"
-	@licRes=$$(for file in $$(find . -type f -iname '*.go' ! -path './vendor/*' ! -path './dagger/internal/*') ; do \
-               awk 'NR<=3' $$file | grep -Eq "(Copyright|generated|GENERATED)" || echo $$file; \
-       done); \
-       if [ -n "$${licRes}" ]; then \
-               echo "license header checking failed:"; echo "$${licRes}"; \
-               exit 1; \
-       fi
+.PHONY: update-go-version
+update-go-version:
+	@bash update-go-version.bash
+	$(MAKE) generate-go-collector-test-files
 
 .PHONY: generate-go-collector-test-files
-file := supported_go_versions.txt
-VERSIONS := $(shell cat ${file})
+file := supported_go_versions.json
+VERSIONS := $(shell grep -o '"version": "[^"]*"' $(file) | sed 's/"version": "\(.*\)"/\1/')
 generate-go-collector-test-files:
 	for GO_VERSION in $(VERSIONS); do \
 		docker run \
@@ -49,4 +51,42 @@ generate-go-collector-test-files:
 
 .PHONY: fmt
 fmt: common-format
-	$(GOIMPORTS) -local github.com/prometheus/client_golang -w .
+
+.PHONY: proto
+proto: ## Regenerate Go from remote write proto.
+proto: $(BUF)
+	@echo ">> regenerating Prometheus Remote Write proto"
+	@cd exp/api/remote/genproto && $(BUF) generate
+	@cd exp/api/remote && find genproto/ -type f -exec sed -i '' 's/protohelpers "github.com\/planetscale\/vtprotobuf\/protohelpers"/protohelpers "github.com\/prometheus\/client_golang\/exp\/internal\/github.com\/planetscale\/vtprotobuf\/protohelpers"/g' {} \;
+	# For some reasons buf generates this unused import, kill it manually for now and reformat.
+	@cd exp/api/remote && find genproto/ -type f -exec sed -i '' 's/_ "github.com\/gogo\/protobuf\/gogoproto"//g' {} \;
+	@cd exp/api/remote && go fmt ./genproto/...
+	$(MAKE) fmt
+
+.PHONY: test-exp
+test-exp:
+	cd exp && $(GOTEST) $(test-flags) $(GOOPTS) $(pkgs)
+
+.PHONY: test-exp-short
+test-exp-short:
+	cd exp && $(GOTEST) -short $(GOOPTS) $(pkgs)
+
+.PHONY: check-crlf
+check-crlf:
+	@echo ">> checking for CRLF line endings"
+	@files=$$(find . -type f -not -path "*/\.*" -not -path "*/vendor/*" -exec file {} \; | grep CRLF | cut -d: -f1); \
+	if [ -n "$$files" ]; then \
+		echo "Files with CRLF line endings found:"; \
+		echo "$$files"; \
+		echo "Run 'make fix-crlf' to fix them"; \
+		exit 1; \
+	fi
+
+.PHONY: fix-crlf
+fix-crlf:
+	@echo ">> fixing CRLF line endings"
+	@files=$$(find . -type f -not -path "*/\.*" -not -path "*/vendor/*" -exec file {} \; | grep CRLF | cut -d: -f1); \
+	for file in $$files; do \
+		tr -d '\r' < "$$file" > "$$file.tmp" && mv "$$file.tmp" "$$file"; \
+	done
+	@echo ">> CRLF line endings fixed"

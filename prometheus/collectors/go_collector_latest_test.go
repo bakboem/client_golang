@@ -112,7 +112,7 @@ func TestWithGoCollectorDefault(t *testing.T) {
 	expected := append(withBaseMetrics(memstatMetrics), defaultRuntimeMetrics...)
 	sort.Strings(expected)
 	if diff := cmp.Diff(got, expected); diff != "" {
-		t.Errorf("[IMPORTANT, those are default metrics, can't change in 1.x] missmatch (-want +got):\n%s", diff)
+		t.Errorf("[IMPORTANT, those are default metrics, can't change in 1.x] mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -132,7 +132,7 @@ func TestWithGoCollectorMemStatsMetricsDisabled(t *testing.T) {
 	}
 
 	if diff := cmp.Diff(got, withBaseMetrics(defaultRuntimeMetrics)); diff != "" {
-		t.Errorf("missmatch (-want +got):\n%s", diff)
+		t.Errorf("mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -190,7 +190,7 @@ func TestGoCollectorAllowList(t *testing.T) {
 			}
 
 			if diff := cmp.Diff(got, test.expected); diff != "" {
-				t.Errorf("missmatch (-want +got):\n%s", diff)
+				t.Errorf("mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -252,13 +252,13 @@ func TestGoCollectorDenyList(t *testing.T) {
 			}
 
 			if diff := cmp.Diff(got, test.expected); diff != "" {
-				t.Errorf("missmatch (-want +got):\n%s", diff)
+				t.Errorf("mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
 }
 
-func ExampleGoCollector() {
+func ExampleNewGoCollector() {
 	reg := prometheus.NewPedanticRegistry()
 
 	// Register the GoCollector with the default options. Only the base metrics, default runtime metrics and memstats are enabled.
@@ -268,7 +268,7 @@ func ExampleGoCollector() {
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func ExampleGoCollector_WithAdvancedGoMetrics() {
+func ExampleNewGoCollector_withAdvancedGoMetrics() {
 	reg := prometheus.NewPedanticRegistry()
 
 	// Enable Go metrics with pre-defined rules. Or your custom rules.
@@ -289,7 +289,7 @@ func ExampleGoCollector_WithAdvancedGoMetrics() {
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func ExampleGoCollector_DefaultRegister() {
+func ExampleNewGoCollector_defaultRegister() {
 	// Unregister the default GoCollector.
 	prometheus.Unregister(NewGoCollector())
 

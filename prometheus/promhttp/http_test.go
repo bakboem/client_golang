@@ -23,13 +23,17 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
 	dto "github.com/prometheus/client_model/go"
+	"go.uber.org/goleak"
 
 	"github.com/prometheus/client_golang/prometheus"
+	_ "github.com/prometheus/client_golang/prometheus/promhttp/zstd"
 )
 
 type errorCollector struct{}
@@ -98,7 +102,7 @@ func readCompressedBody(r io.Reader, comp Compression) (string, error) {
 		got, err := io.ReadAll(reader)
 		return string(got), err
 	}
-	return "", fmt.Errorf("Unsupported compression")
+	return "", errors.New("Unsupported compression")
 }
 
 func TestHandlerErrorHandling(t *testing.T) {
@@ -131,7 +135,7 @@ func TestHandlerErrorHandling(t *testing.T) {
 	logger := log.New(logBuf, "", 0)
 
 	writer := httptest.NewRecorder()
-	request, _ := http.NewRequest("GET", "/", nil)
+	request, _ := http.NewRequest(http.MethodGet, "/", nil)
 	request.Header.Add("Accept", "test/plain")
 
 	mReg := &mockTransactionGatherer{g: reg}
@@ -158,11 +162,11 @@ func TestHandlerErrorHandling(t *testing.T) {
 		t.Fatalf("unexpected number of done invokes, want 0, got %d", got)
 	}
 
-	wantMsg := `error gathering metrics: error collecting metric Desc{fqName: "invalid_metric", help: "not helpful", constLabels: {}, variableLabels: {}}: collect error
+	wantMsg := `error gathering metrics: error collecting metric Desc{fqName: "invalid_metric", help: "not helpful", unit: "", constLabels: {}, variableLabels: {}}: collect error
 `
 	wantErrorBody := `An error has occurred while serving metrics:
 
-error collecting metric Desc{fqName: "invalid_metric", help: "not helpful", constLabels: {}, variableLabels: {}}: collect error
+error collecting metric Desc{fqName: "invalid_metric", help: "not helpful", unit: "", constLabels: {}, variableLabels: {}}: collect error
 `
 	wantOKBody1 := `# HELP name docstring
 # TYPE name counter
@@ -252,7 +256,7 @@ func TestInstrumentMetricHandler(t *testing.T) {
 	// Do it again to test idempotency.
 	InstrumentMetricHandler(reg, HandlerForTransactional(mReg, HandlerOpts{}))
 	writer := httptest.NewRecorder()
-	request, _ := http.NewRequest("GET", "/", nil)
+	request, _ := http.NewRequest(http.MethodGet, "/", nil)
 	request.Header.Add(acceptHeader, acceptTextPlain)
 
 	handler.ServeHTTP(writer, request)
@@ -311,7 +315,7 @@ func TestHandlerMaxRequestsInFlight(t *testing.T) {
 	w1 := httptest.NewRecorder()
 	w2 := httptest.NewRecorder()
 	w3 := httptest.NewRecorder()
-	request, _ := http.NewRequest("GET", "/", nil)
+	request, _ := http.NewRequest(http.MethodGet, "/", nil)
 	request.Header.Add(acceptHeader, acceptTextPlain)
 
 	c := blockingCollector{Block: make(chan struct{}), CollectStarted: make(chan struct{}, 1)}
@@ -348,7 +352,7 @@ func TestHandlerTimeout(t *testing.T) {
 	handler := HandlerFor(reg, HandlerOpts{Timeout: time.Millisecond})
 	w := httptest.NewRecorder()
 
-	request, _ := http.NewRequest("GET", "/", nil)
+	request, _ := http.NewRequest(http.MethodGet, "/", nil)
 	request.Header.Add("Accept", "test/plain")
 
 	c := blockingCollector{Block: make(chan struct{}), CollectStarted: make(chan struct{}, 1)}
@@ -372,7 +376,7 @@ func TestInstrumentMetricHandlerWithCompression(t *testing.T) {
 	handler := InstrumentMetricHandler(reg, HandlerForTransactional(mReg, HandlerOpts{DisableCompression: false}))
 	compression := Zstd
 	writer := httptest.NewRecorder()
-	request, _ := http.NewRequest("GET", "/", nil)
+	request, _ := http.NewRequest(http.MethodGet, "/", nil)
 	request.Header.Add(acceptHeader, acceptTextPlain)
 	request.Header.Add(acceptEncodingHeader, string(compression))
 
@@ -484,7 +488,7 @@ func TestInstrumentMetricHandlerWithCompression(t *testing.T) {
 func TestNegotiateEncodingWriter(t *testing.T) {
 	var defaultCompressions []string
 
-	for _, comp := range defaultCompressionFormats {
+	for _, comp := range defaultCompressionFormats() {
 		defaultCompressions = append(defaultCompressions, string(comp))
 	}
 
@@ -533,7 +537,7 @@ func TestNegotiateEncodingWriter(t *testing.T) {
 	}
 
 	for _, test := range testCases {
-		request, _ := http.NewRequest("GET", "/", nil)
+		request, _ := http.NewRequest(http.MethodGet, "/", nil)
 		request.Header.Add(acceptEncodingHeader, test.acceptEncoding)
 		rr := httptest.NewRecorder()
 		_, encodingHeader, _, err := negotiateEncodingWriter(request, rr, test.offeredCompressions)
@@ -545,6 +549,134 @@ func TestNegotiateEncodingWriter(t *testing.T) {
 		if encodingHeader != test.expectedCompression {
 			t.Errorf("got different compression type: %v, expected: %v", encodingHeader, test.expectedCompression)
 		}
+	}
+}
+
+func TestHandlerWithUnit(t *testing.T) {
+	reg := prometheus.NewRegistry()
+
+	counter := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "http_request_duration_seconds_total",
+		Help: "Total time spent handling HTTP requests.",
+		Unit: "seconds",
+	})
+	reg.MustRegister(counter)
+	counter.Add(42)
+
+	expectedOpenMetricsOutput := `# HELP http_request_duration_seconds Total time spent handling HTTP requests.
+# TYPE http_request_duration_seconds counter
+# UNIT http_request_duration_seconds seconds
+http_request_duration_seconds_total 42.0
+# EOF
+`
+
+	handler := HandlerFor(reg, HandlerOpts{EnableOpenMetrics: true})
+	writer := httptest.NewRecorder()
+	request, _ := http.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Add(acceptHeader, "application/openmetrics-text")
+
+	handler.ServeHTTP(writer, request)
+
+	if got, want := writer.Header().Get(contentTypeHeader), "application/openmetrics-text; version=0.0.1; charset=utf-8; escaping=underscores"; got != want {
+		t.Errorf("expected Content-Type %q, got %q", want, got)
+	}
+
+	if got := writer.Body.String(); got != expectedOpenMetricsOutput {
+		t.Errorf("expected body:\n%s\ngot:\n%s", expectedOpenMetricsOutput, got)
+	}
+}
+
+func TestHandlerWithEmptyUnit(t *testing.T) {
+	reg := prometheus.NewRegistry()
+
+	counter := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "http_requests_total",
+		Help: "Total number of HTTP requests.",
+		// Unit intentionally left empty
+	})
+	reg.MustRegister(counter)
+	counter.Add(10)
+
+	expectedOpenMetricsOutput := `# HELP http_requests Total number of HTTP requests.
+# TYPE http_requests counter
+http_requests_total 10.0
+# EOF
+`
+
+	handler := HandlerFor(reg, HandlerOpts{EnableOpenMetrics: true})
+	writer := httptest.NewRecorder()
+	request, _ := http.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Add(acceptHeader, "application/openmetrics-text")
+
+	handler.ServeHTTP(writer, request)
+
+	if got := writer.Body.String(); got != expectedOpenMetricsOutput {
+		t.Errorf("expected body:\n%s\ngot:\n%s", expectedOpenMetricsOutput, got)
+	}
+}
+
+func TestHandlerWithLongUnit(t *testing.T) {
+	reg := prometheus.NewRegistry()
+
+	// A very long unit string to test edge case handling
+	longUnit := "verylongunitnamethatexceedsnormallengthexpectationsbutistoleratednethelessbecausewedonotvalidateit"
+
+	counter := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "test_metric_total",
+		Help: "Test metric with a very long unit.",
+		Unit: longUnit,
+	})
+	reg.MustRegister(counter)
+	counter.Add(1)
+
+	expectedOpenMetricsOutput := `# HELP test_metric Test metric with a very long unit.
+# TYPE test_metric counter
+# UNIT test_metric ` + longUnit + `
+test_metric_total 1.0
+# EOF
+`
+
+	handler := HandlerFor(reg, HandlerOpts{EnableOpenMetrics: true})
+	writer := httptest.NewRecorder()
+	request, _ := http.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Add(acceptHeader, "application/openmetrics-text")
+
+	handler.ServeHTTP(writer, request)
+
+	if got := writer.Body.String(); got != expectedOpenMetricsOutput {
+		t.Errorf("expected body:\n%s\ngot:\n%s", expectedOpenMetricsOutput, got)
+	}
+}
+
+func TestHandlerWithEmojiUnit(t *testing.T) {
+	reg := prometheus.NewRegistry()
+
+	emojiUnit := "🚀速度"
+
+	counter := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "rocket_launches_total",
+		Help: "Total rocket launches with emoji unit.",
+		Unit: emojiUnit,
+	})
+	reg.MustRegister(counter)
+	counter.Add(3)
+
+	expectedOpenMetricsOutput := `# HELP rocket_launches Total rocket launches with emoji unit.
+# TYPE rocket_launches counter
+# UNIT rocket_launches ` + emojiUnit + `
+rocket_launches_total 3.0
+# EOF
+`
+
+	handler := HandlerFor(reg, HandlerOpts{EnableOpenMetrics: true})
+	writer := httptest.NewRecorder()
+	request, _ := http.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Add(acceptHeader, "application/openmetrics-text")
+
+	handler.ServeHTTP(writer, request)
+
+	if got := writer.Body.String(); got != expectedOpenMetricsOutput {
+		t.Errorf("expected body:\n%s\ngot:\n%s", expectedOpenMetricsOutput, got)
 	}
 }
 
@@ -631,11 +763,446 @@ func BenchmarkCompression(b *testing.B) {
 			b.Run(benchmark.name+"_"+size.name, func(b *testing.B) {
 				for i := 0; i < b.N; i++ {
 					writer := httptest.NewRecorder()
-					request, _ := http.NewRequest("GET", "/", nil)
+					request, _ := http.NewRequest(http.MethodGet, "/", nil)
 					request.Header.Add(acceptEncodingHeader, benchmark.compressionType)
 					handler.ServeHTTP(writer, request)
 				}
 			})
 		}
+	}
+}
+
+func TestHandlerWithMetricFilter(t *testing.T) {
+	reg := prometheus.NewRegistry()
+
+	counter := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "test_counter",
+		Help: "A test counter.",
+	})
+	gauge := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "test_gauge",
+		Help: "A test gauge.",
+	})
+	histogram := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name: "test_histogram",
+		Help: "A test histogram.",
+	})
+
+	reg.MustRegister(counter, gauge, histogram)
+	counter.Inc()
+	gauge.Set(42)
+	histogram.Observe(3.14)
+
+	testCases := []struct {
+		name             string
+		url              string
+		shouldContain    []string
+		shouldNotContain []string
+	}{
+		{
+			name:             "single metric filter",
+			url:              "/?name[]=test_counter",
+			shouldContain:    []string{"test_counter"},
+			shouldNotContain: []string{"test_gauge", "test_histogram"},
+		},
+		{
+			name:             "multiple metric filters",
+			url:              "/?name[]=test_counter&name[]=test_gauge",
+			shouldContain:    []string{"test_counter", "test_gauge"},
+			shouldNotContain: []string{"test_histogram"},
+		},
+		{
+			name:             "no filter returns all metrics",
+			url:              "/",
+			shouldContain:    []string{"test_counter", "test_gauge", "test_histogram"},
+			shouldNotContain: []string{},
+		},
+		{
+			name:             "non-matching filter returns empty",
+			url:              "/?name[]=nonexistent_metric",
+			shouldContain:    []string{},
+			shouldNotContain: []string{"test_counter", "test_gauge", "test_histogram"},
+		},
+		{
+			name:             "empty name[] value",
+			url:              "/?name[]=",
+			shouldContain:    []string{},
+			shouldNotContain: []string{"test_counter", "test_gauge", "test_histogram"},
+		},
+		{
+			name:             "duplicate name[] values",
+			url:              "/?name[]=test_counter&name[]=test_counter",
+			shouldContain:    []string{"test_counter"},
+			shouldNotContain: []string{"test_gauge", "test_histogram"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mReg := &mockTransactionGatherer{g: reg}
+
+			writer := httptest.NewRecorder()
+			request, err := http.NewRequest(http.MethodGet, tc.url, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			request.Header.Add(acceptHeader, acceptTextPlain)
+
+			handler := HandlerForTransactional(mReg, HandlerOpts{})
+			handler.ServeHTTP(writer, request)
+
+			if got, want := writer.Code, http.StatusOK; got != want {
+				t.Errorf("got HTTP status code %d, want %d", got, want)
+			}
+
+			body := writer.Body.String()
+			for _, expected := range tc.shouldContain {
+				if !strings.Contains(body, expected) {
+					t.Errorf("expected body to contain %q, got: %s", expected, body)
+				}
+			}
+			for _, notExpected := range tc.shouldNotContain {
+				if strings.Contains(body, notExpected) {
+					t.Errorf("expected body to NOT contain %q, got: %s", notExpected, body)
+				}
+			}
+
+			// Verify that Gather and done are called even with filtering.
+			if got := mReg.gatherInvoked; got != 1 {
+				t.Errorf("unexpected number of gather invokes, want 1, got %d", got)
+			}
+			if got := mReg.doneInvoked; got != 1 {
+				t.Errorf("unexpected number of done invokes, want 1, got %d", got)
+			}
+		})
+	}
+}
+
+func TestHandlerWithNilRequestURL(t *testing.T) {
+	reg := prometheus.NewRegistry()
+
+	counter := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "test_counter",
+		Help: "A test counter.",
+	})
+	reg.MustRegister(counter)
+	counter.Inc()
+
+	writer := httptest.NewRecorder()
+	handler := HandlerFor(reg, HandlerOpts{ErrorHandling: ContinueOnError})
+	handler.ServeHTTP(writer, &http.Request{})
+
+	if got, want := writer.Code, http.StatusOK; got != want {
+		t.Errorf("got HTTP status code %d, want %d", got, want)
+	}
+	if body := writer.Body.String(); !strings.Contains(body, "test_counter") {
+		t.Errorf("expected body to contain test_counter, got: %s", body)
+	}
+}
+
+// syncGatherCounter is a thread-safe TransactionalGatherer wrapper that counts
+// Gather and done invocations. Safe for concurrent use from multiple goroutines,
+// unlike mockTransactionGatherer whose counters are not race-safe.
+type syncGatherCounter struct {
+	g            prometheus.Gatherer
+	gatherCalled atomic.Int64
+	doneCalled   atomic.Int64
+}
+
+func (m *syncGatherCounter) Gather() ([]*dto.MetricFamily, func(), error) {
+	m.gatherCalled.Add(1)
+	mfs, err := m.g.Gather()
+	return mfs, func() { m.doneCalled.Add(1) }, err
+}
+
+// TestCoalesceGatherSequentialInvariant verifies that sequential requests each
+// trigger exactly one Gather call and one done call.
+func TestCoalesceGatherSequentialInvariant(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	counter := &syncGatherCounter{g: reg}
+	handler := HandlerForTransactional(counter, HandlerOpts{CoalesceGather: true})
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Add(acceptHeader, acceptTextPlain)
+
+	const n = 3
+	for i := range n {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if got, want := w.Code, http.StatusOK; got != want {
+			t.Fatalf("request %d: HTTP status %d, want %d", i+1, got, want)
+		}
+	}
+	if got, want := counter.gatherCalled.Load(), int64(n); got != want {
+		t.Errorf("Gather called %d times, want %d", got, want)
+	}
+	if got, want := counter.doneCalled.Load(), int64(n); got != want {
+		t.Errorf("done called %d times, want %d", got, want)
+	}
+}
+
+// TestCoalesceGatherDoneCalledExactlyOnce verifies that when a second request
+// joins an in-flight Gather cycle, exactly one Gather and one done call occur.
+func TestCoalesceGatherDoneCalledExactlyOnce(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	reg := prometheus.NewRegistry()
+	block := make(chan struct{})
+	started := make(chan struct{}, 1)
+	reg.MustRegister(blockingCollector{CollectStarted: started, Block: block})
+
+	// Wrap explicitly so the test can observe when request 2 has joined the
+	// in-flight cycle. HandlerForTransactional with CoalesceGather builds an
+	// equivalent wrapper internally but keeps it hidden from the test.
+	counter := &syncGatherCounter{g: reg}
+	cg := &coalescingGatherer{g: counter}
+	handler := HandlerForTransactional(cg, HandlerOpts{})
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Add(acceptHeader, acceptTextPlain)
+
+	// Start request 1 in background; it blocks in Collect.
+	w1 := httptest.NewRecorder()
+	req1Done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(w1, req)
+		close(req1Done)
+	}()
+	<-started // Gather 1 is now in-flight and blocked in Collect.
+
+	// Start request 2; it will join the in-flight Gather cycle.
+	w2 := httptest.NewRecorder()
+	req2Done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(w2, req)
+		close(req2Done)
+	}()
+
+	// Wait until request 2 has joined the cycle (refs == 2) before releasing,
+	// so coalescing is guaranteed rather than dependent on goroutine timing.
+	waitForRefs(t, cg, 2)
+	close(block)
+	<-req1Done
+	<-req2Done
+
+	// With request 2 joining an in-flight cycle, both share one Gather and one done.
+	if got := counter.gatherCalled.Load(); got != 1 {
+		t.Errorf("Gather called %d times for 2 coalesced requests, want exactly 1", got)
+	}
+	if got := counter.doneCalled.Load(); got != 1 {
+		t.Errorf("done called %d times, want exactly 1", got)
+	}
+	for i, w := range []*httptest.ResponseRecorder{w1, w2} {
+		if got, want := w.Code, http.StatusOK; got != want {
+			t.Errorf("request %d: HTTP status %d, want %d", i+1, got, want)
+		}
+	}
+}
+
+// TestCoalesceGatherGoroutineLeakFree verifies that concurrent requests with a
+// slow collector do not leak goroutines when CoalesceGather is enabled.
+func TestCoalesceGatherGoroutineLeakFree(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	reg := prometheus.NewRegistry()
+	block := make(chan struct{})
+	started := make(chan struct{}, 1)
+	reg.MustRegister(blockingCollector{CollectStarted: started, Block: block})
+
+	handler := HandlerForTransactional(
+		&syncGatherCounter{g: reg},
+		HandlerOpts{CoalesceGather: true},
+	)
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Add(acceptHeader, acceptTextPlain)
+
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Go(func() {
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+		})
+	}
+	<-started
+	close(block)
+	wg.Wait()
+	// goleak.VerifyNone (deferred above) asserts no goroutines leaked.
+}
+
+// TestCoalesceGatherNewCycleAfterCompletion verifies that once all handlers of a
+// cycle have released, the next request starts a fresh Gather.
+func TestCoalesceGatherNewCycleAfterCompletion(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	counter := &syncGatherCounter{g: reg}
+	handler := HandlerForTransactional(counter, HandlerOpts{CoalesceGather: true})
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Add(acceptHeader, acceptTextPlain)
+
+	// Cycle 1.
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	if got, want := counter.gatherCalled.Load(), int64(1); got != want {
+		t.Fatalf("after cycle 1: Gather called %d times, want %d", got, want)
+	}
+	if got, want := counter.doneCalled.Load(), int64(1); got != want {
+		t.Fatalf("after cycle 1: done called %d times, want %d", got, want)
+	}
+
+	// Cycle 2: previous cycle is complete so a fresh Gather must run.
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	if got, want := counter.gatherCalled.Load(), int64(2); got != want {
+		t.Errorf("after cycle 2: Gather called %d times, want %d", got, want)
+	}
+	if got, want := counter.doneCalled.Load(), int64(2); got != want {
+		t.Errorf("after cycle 2: done called %d times, want %d", got, want)
+	}
+}
+
+// inflightRefs reports how many callers currently share the in-flight cycle.
+// It lives in the test file so production code carries no test-only hooks; tests
+// use it to wait deterministically until a joiner has entered the cycle.
+func (c *coalescingGatherer) inflightRefs() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cycle == nil {
+		return 0
+	}
+	return c.cycle.refs
+}
+
+// waitForRefs blocks until cg reports at least want in-flight refs, failing the
+// test if that does not happen within a short deadline. It must be called from
+// the test goroutine, as it reports failure via t.Fatalf.
+func waitForRefs(t *testing.T, cg *coalescingGatherer, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := cg.inflightRefs()
+		if got >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %d in-flight refs, have %d", want, got)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// panicGatherer is a TransactionalGatherer whose Gather panics after signaling
+// that it started and waiting to be released. A panicking Collector cannot reach
+// the panic guard in coalescingGatherer because Registry.Gather recovers
+// Collector panics into errors, so the panic is raised at the gatherer level.
+type panicGatherer struct {
+	started chan struct{}
+	block   chan struct{}
+}
+
+func (p *panicGatherer) Gather() ([]*dto.MetricFamily, func(), error) {
+	close(p.started)
+	<-p.block
+	panic("boom")
+}
+
+// TestCoalesceGatherPanicUnblocksJoinersWithError verifies that when the wrapped
+// gatherer panics, a request that joined the same cycle receives errGatherPanicked
+// instead of a nil error with an empty response, the leader's panic still
+// propagates, and the cycle is cleared afterward.
+func TestCoalesceGatherPanicUnblocksJoinersWithError(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	p := &panicGatherer{started: make(chan struct{}), block: make(chan struct{})}
+	cg := &coalescingGatherer{g: p}
+
+	// Leader creates the cycle and panics once released; recover so the test
+	// goroutine survives, mirroring net/http's per-request panic recovery.
+	leaderPanicked := make(chan any, 1)
+	go func() {
+		defer func() { leaderPanicked <- recover() }()
+		_, done, _ := cg.Gather()
+		if done != nil {
+			done()
+		}
+	}()
+	<-p.started
+
+	// Joiner joins the in-flight cycle and blocks on <-cy.ready.
+	type joinResult struct {
+		done func()
+		err  error
+	}
+	joined := make(chan joinResult, 1)
+	go func() {
+		_, done, err := cg.Gather()
+		joined <- joinResult{done: done, err: err}
+	}()
+
+	// Ensure the joiner has joined the cycle before releasing the panic.
+	waitForRefs(t, cg, 2)
+	close(p.block)
+
+	if r := <-leaderPanicked; r == nil {
+		t.Error("leader Gather did not panic; want the panic to propagate")
+	}
+	res := <-joined
+	if !errors.Is(res.err, errGatherPanicked) {
+		t.Errorf("joiner err = %v, want errGatherPanicked", res.err)
+	}
+	if res.done != nil {
+		res.done() // must be safe to call: no panic, no double-done.
+	}
+	// inflightRefs reports 0 once c.cycle is detached, which the leader does on
+	// the panic path. This confirms the coalescer starts a fresh cycle next
+	// time; it does not track the orphaned cycle's own ref count (the leader's
+	// ref is intentionally never released there).
+	if got := cg.inflightRefs(); got != 0 {
+		t.Errorf("cycle not detached after panic: inflightRefs = %d, want 0", got)
+	}
+}
+
+// TestCoalesceGatherCallersGetDistinctSlices verifies that callers sharing one
+// cycle each receive their own slice header, so one caller reordering or
+// filtering its slice cannot race another caller of the same cycle.
+func TestCoalesceGatherCallersGetDistinctSlices(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	reg := prometheus.NewRegistry()
+	cnt := prometheus.NewCounter(prometheus.CounterOpts{Name: "c_total", Help: "help"})
+	cnt.Inc()
+	reg.MustRegister(cnt)
+	block := make(chan struct{})
+	started := make(chan struct{}, 1)
+	reg.MustRegister(blockingCollector{CollectStarted: started, Block: block})
+
+	cg := &coalescingGatherer{g: &syncGatherCounter{g: reg}}
+
+	type result struct {
+		mfs  []*dto.MetricFamily
+		done func()
+	}
+	got := make(chan result, 2)
+	call := func() {
+		mfs, done, err := cg.Gather()
+		if err != nil {
+			t.Errorf("Gather returned error: %v", err)
+		}
+		got <- result{mfs: mfs, done: done}
+	}
+
+	go call()
+	<-started             // leader is in-flight, blocked in Collect.
+	go call()             // second caller joins the same cycle.
+	waitForRefs(t, cg, 2) // both callers share the cycle before release.
+	close(block)
+
+	r1 := <-got
+	r2 := <-got
+	defer r1.done()
+	defer r2.done()
+
+	if len(r1.mfs) == 0 || len(r2.mfs) == 0 {
+		t.Fatalf("expected non-empty metric families, got %d and %d", len(r1.mfs), len(r2.mfs))
+	}
+	// Distinct backing arrays: clearing one caller's slot must not affect the
+	// other. This fails if the coalescer hands out the shared slice directly.
+	r1.mfs[0] = nil
+	if r2.mfs[0] == nil {
+		t.Error("callers share a slice backing array; each caller must get its own copy")
 	}
 }

@@ -1,5 +1,107 @@
 ## Unreleased
 
+* [FEATURE] testutil: Add GatherAndFormat to encode a subset of metrics from a Gatherer. #2091
+
+## 1.24.1 / 2026-07-23
+
+* [BUGFIX] promhttp: Fix panic on requests with nil URL. #2065
+
+## 1.24.0 / 2026-07-20
+
+* [CHANGE] Minimum required Go version is now 1.25, only the two latest Go versions (1.25 and 1.26) are supported from now on. #1862
+* [CHANGE] prometheus: Name validation now always uses the UTF-8 scheme instead of the deprecated `model.NameValidationScheme` global. Default behavior is unchanged; code that set `NameValidationScheme = LegacyValidation` no longer gets legacy enforcement at metric, label, and push-grouping construction. #2051
+* [CHANGE] api/prometheus/v1: Support matchers (`matches[]` parameter) in `Rules` method (`Rules(ctx context.Context, matches []string) (RulesResult, error)`). #1843
+* [CHANGE] api/prometheus/v1: Refactor `LabelNames` method to return `model.LabelNames` instead of `[]string` for consistency across the API. #1850
+* [CHANGE] exp/api/remote: Simplify `Store` interface, rename `Handler` to `WriteHandler`, and encapsulate write response handling. #1855
+* [FEATURE] prometheus: Add new Go 1.26 runtime metrics (`/sched/goroutines-created:goroutines`, `/sched/goroutines/not-in-go:goroutines`, `/sched/goroutines/runnable:goroutines`, `/sched/goroutines/running:goroutines`, `/sched/goroutines/waiting:goroutines`, `/sched/threads/total:threads`). #1942
+* [FEATURE] prometheus: Add `WithUnit(unit string)` option and explicit OpenMetrics unit support in `CounterOpts`, `GaugeOpts`, `SummaryOpts`, and `HistogramOpts`. #1392
+* [FEATURE] prometheus: Expose descriptor construction error through public `Err()` method on `Desc`. #1902
+* [FEATURE] promhttp: Add opt-in `HandlerOpts.CoalesceGather` to deduplicate concurrent `Gather` calls so overlapping scrapes share one collection cycle, preventing goroutine pile-up when the scrape rate outpaces collection time. #1969
+* [FEATURE] promhttp: HTTP handlers created by `promhttp` package now support metrics filtering by providing one or more `name[]` query parameters. The default behavior when none are provided remains the same, returning all metrics. #1925
+* [FEATURE] api/prometheus/v1: Add query formatting endpoint support (`/format_query`) and `FormatQuery(ctx context.Context, query string) (string, error)` method. #1846, #1856
+* [FEATURE] api/prometheus/v1: Add support for `/status/tsdb/blocks` endpoint via `TSDBBlocks(ctx context.Context) ([]TSDBBlock, error)` method. #1896
+* [FEATURE] exp/api/remote: Export `BackoffConfig` to allow customization when using `WithAPIBackoff`. #1895
+* [FEATURE] exp/api/remote: Add `RetryCallBack` to allow custom logging or handling on retry attempts in the remote write client. #1888, #1890
+* [ENHANCEMENT] prometheus/collectors/version: Allow specifying custom labels when registering the version collector. #1860
+* [ENHANCEMENT] api: Use cloned `http.DefaultTransport` when constructing default HTTP clients to prevent accidental mutations of shared global transport state. #1885
+* [BUGFIX] prometheus: Recover from collector panics during `Gather()` and return an error instead of crashing the process. #1961
+* [BUGFIX] prometheus: Fix `cpu-seconds` unit suffix handling for metric `go_cpu_classes_gc_mark_assist_cpu_seconds`. #1991
+* [BUGFIX] promhttp: `InstrumentHandlerDuration` and `InstrumentHandlerCounter` no longer panic when given an observer/counter that does not implement `ExemplarObserver`/`ExemplarAdder` (e.g. a `SummaryVec`). The exemplar is dropped and the value is recorded via the plain `Observe`/`Add` path, matching the safe-cast already used by `Timer.ObserveDurationWithExemplar`. #2005
+* [BUGFIX] api/prometheus/v1: Fall back to `GET` requests when `POST` requests return `403 Forbidden` or method not allowed. #2030
+* [BUGFIX] api: Respect context cancellation inside `httpClient.Do`. #1971
+* [BUGFIX] exp/api/remote: Fix compression buffer pooling where compressed buffers were released prematurely, causing corrupted remote-write payloads. #1889
+* [BUGFIX] exp/api/remote: Reject malformed snappy payloads declaring huge decoded sizes. Enforce a 32MB decoded-size limit to prevent OOM from oversized remote-write requests. #1917
+* [BUGFIX] exp/api/remote: Ensure remote write v2 headers cannot be returned on v1 requests. #1927
+
+## 1.23.2 / 2025-09-05
+
+This release is made to upgrade to prometheus/common v0.66.1, which drops the dependencies github.com/grafana/regexp and go.uber.org/atomic and replaces gopkg.in/yaml.v2 with go.yaml.in/yaml/v2 (a drop-in replacement).
+There are no functional changes.
+
+## 1.23.1 / 2025-09-04
+
+This release is made to be compatible with a backwards incompatible API change
+in prometheus/common v0.66.0. There are no functional changes.
+
+## 1.23.0 / 2025-07-30
+
+* [CHANGE] Minimum required Go version is now 1.23, only the two latest Go versions are supported from now on. #1812
+* [FEATURE] Add WrapCollectorWith and WrapCollectorWithPrefix #1766
+* [FEATURE] Add exemplars for native histograms #1686
+* [ENHANCEMENT] exp/api: Bubble up status code from writeResponse #1823
+* [ENHANCEMENT] collector/go: Update runtime metrics for Go v1.23 and v1.24 #1833
+* [BUGFIX] exp/api: client prompt return on context cancellation #1729
+
+## 1.22.0 / 2025-04-07
+
+:warning: This release contains potential breaking change if you use experimental `zstd` support introduce in #1496 :warning:
+
+Experimental support for `zstd` on scrape was added, controlled by the request `Accept-Encoding` header.
+It was enabled by default since version 1.20, but now you need to add a blank import to enable it.
+The decision to make it opt-in by default was originally made because the Go standard library was expected to have default zstd support added soon,
+https://github.com/golang/go/issues/62513 however, the work took longer than anticipated and it will be postponed to upcoming major Go versions.
+
+
+e.g.:
+> ```go
+> import (
+>   _ "github.com/prometheus/client_golang/prometheus/promhttp/zstd"
+> )
+> ```
+
+* [FEATURE] prometheus: Add new CollectorFunc utility #1724
+* [CHANGE] Minimum required Go version is now 1.22 (we also test client_golang against latest go version - 1.24) #1738
+* [FEATURE] api: `WithLookbackDelta` and `WithStats` options have been added to API client. #1743
+* [CHANGE] :warning: promhttp: Isolate zstd support and klauspost/compress library use to promhttp/zstd package. #1765
+
+## 1.21.1 / 2025-03-04
+
+* [BUGFIX] prometheus: Revert of `Inc`, `Add` and `Observe` cumulative metric CAS optimizations (#1661), causing regressions on low contention cases.
+* [BUGFIX] prometheus: Fix GOOS=ios build, broken due to process_collector_* wrong build tags.
+
+## 1.21.0 / 2025-02-17
+
+:warning: This release contains potential breaking change if you upgrade `github.com/prometheus/common` to 0.62+ together with client_golang. :warning:
+
+New common version [changes `model.NameValidationScheme` global variable](https://github.com/prometheus/common/pull/724), which relaxes the validation of label names and metric name, allowing all UTF-8 characters. Typically, this should not break any user, unless your test or usage expects strict certain names to panic/fail on client_golang metric registration, gathering or scrape. In case of problems change `model.NameValidationScheme` to old `model.LegacyValidation` value in your project `init` function.
+
+* [BUGFIX] gocollector: Fix help message for runtime/metric metrics. #1583
+* [BUGFIX] prometheus: Fix `Desc.String()` method for no labels case. #1687
+* [ENHANCEMENT] prometheus: Optimize popular `prometheus.BuildFQName` function; now up to 30% faster. #1665
+* [ENHANCEMENT] prometheus: Optimize `Inc`, `Add` and `Observe` cumulative metrics; now up to 50% faster under high concurrent contention. #1661
+* [CHANGE] Upgrade prometheus/common to 0.62.0 which changes `model.NameValidationScheme` global variable. #1712
+* [CHANGE] Add support for Go 1.23. #1602
+* [FEATURE] process_collector: Add support for Darwin systems. #1600 #1616 #1625 #1675 #1715
+* [FEATURE] api: Add ability to invoke `CloseIdleConnections` on api.Client using `api.Client.(CloseIdler).CloseIdleConnections()` casting. #1513
+* [FEATURE] promhttp: Add `promhttp.HandlerOpts.EnableOpenMetricsTextCreatedSamples` option to create OpenMetrics _created lines. Not recommended unless you want to use opt-in Created Timestamp feature. Community works on OpenMetrics 2.0 format that should make those lines obsolete (they increase cardinality significantly). #1408
+* [FEATURE] prometheus: Add `NewConstNativeHistogram` function. #1654
+
+## 1.20.5 / 2024-10-15
+
+* [BUGFIX] testutil: Reverted #1424; functions using compareMetricFamilies are (again) only failing if filtered metricNames are in the expected input.
+
+## 1.20.4 / 2024-09-07
+
 * [BUGFIX] histograms: Fix possible data race when appending exemplars vs metrics gather. #1623
 
 ## 1.20.3 / 2024-09-05
@@ -28,7 +130,7 @@
 * [FEATURE] promlint: Add duplicated metric lint rule. #1472
 * [BUGFIX] promlint: Relax metric type in name linter rule. #1455
 * [BUGFIX] promhttp: Make sure server instrumentation wrapping supports new and future extra responseWriter methods. #1480
-* [BUGFIX] testutil: Functions using compareMetricFamilies are now failing if filtered metricNames are not in the input. #1424
+* [BUGFIX] **breaking** testutil: Functions using compareMetricFamilies are now failing if filtered metricNames are not in the input. #1424 (reverted in 1.20.5)
 
 ## 1.19.0 / 2024-02-27
 

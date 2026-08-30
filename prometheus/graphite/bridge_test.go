@@ -342,7 +342,7 @@ func stringToLines(s string) (lines []string, err error) {
 		lines = append(lines, scanner.Text())
 	}
 	err = scanner.Err()
-	return
+	return lines, err
 }
 
 func TestPush(t *testing.T) {
@@ -467,4 +467,34 @@ func ExampleBridge() {
 
 	// Start pushing metrics to Graphite in the Run() loop.
 	b.Run(ctx)
+}
+
+func TestReplaceInvalidRune(t *testing.T) {
+	tests := []struct {
+		in   rune
+		want rune
+	}{
+		{' ', '.'},
+
+		{'a', 'a'},
+		{'B', 'B'},
+		{'0', '0'},
+		{'9', '9'},
+		{'_', '_'},
+		{':', ':'},
+		{'-', '-'},
+
+		{'#', '_'},
+		{'$', '_'},
+		{'@', '_'},
+		{'!', '_'},
+		{'~', '_'},
+	}
+
+	for _, tt := range tests {
+		got := replaceInvalidRune(tt.in)
+		if got != tt.want {
+			t.Fatalf("replaceInvalidRune(%q) = %q; want %q", tt.in, got, tt.want)
+		}
+	}
 }

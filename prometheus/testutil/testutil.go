@@ -30,7 +30,9 @@
 // most appropriate use is not so much testing instrumentation of your code, but
 // testing custom prometheus.Collector implementations and in particular whole
 // exporters, i.e. programs that retrieve telemetry data from a 3rd party source
-// and convert it into Prometheus metrics.
+// and convert it into Prometheus metrics. CollectAndFormat and GatherAndFormat
+// return the same exposition bytes when you need to inspect a subset without a
+// full expected fixture.
 //
 // In a similar pattern, CollectAndLint and GatherAndLint can be used to detect
 // metrics that have issues with their name, type, or metadata without being
@@ -160,6 +162,9 @@ func GatherAndCount(g prometheus.Gatherer, metricNames ...string) (int, error) {
 // ScrapeAndCompare calls a remote exporter's endpoint which is expected to return some metrics in
 // plain text format. Then it compares it with the results that the `expected` would return.
 // If the `metricNames` is not empty it would filter the comparison only to the given metric names.
+//
+// NOTE: Be mindful of accidental discrepancies between expected and metricNames; metricNames filter
+// both expected and scraped metrics. See https://github.com/prometheus/client_golang/issues/1351.
 func ScrapeAndCompare(url string, expected io.Reader, metricNames ...string) error {
 	resp, err := http.Get(url)
 	if err != nil {
@@ -187,6 +192,9 @@ func ScrapeAndCompare(url string, expected io.Reader, metricNames ...string) err
 
 // CollectAndCompare collects the metrics identified by `metricNames` and compares them in the Prometheus text
 // exposition format to the data read from expected.
+//
+// NOTE: Be mindful of accidental discrepancies between expected and metricNames; metricNames filter
+// both expected and collected metrics. See https://github.com/prometheus/client_golang/issues/1351.
 func CollectAndCompare(c prometheus.Collector, expected io.Reader, metricNames ...string) error {
 	reg := prometheus.NewPedanticRegistry()
 	if err := reg.Register(c); err != nil {
@@ -199,6 +207,9 @@ func CollectAndCompare(c prometheus.Collector, expected io.Reader, metricNames .
 // it to an expected output read from the provided Reader in the Prometheus text
 // exposition format. If any metricNames are provided, only metrics with those
 // names are compared.
+//
+// NOTE: Be mindful of accidental discrepancies between expected and metricNames; metricNames filter
+// both expected and gathered metrics. See https://github.com/prometheus/client_golang/issues/1351.
 func GatherAndCompare(g prometheus.Gatherer, expected io.Reader, metricNames ...string) error {
 	return TransactionalGatherAndCompare(prometheus.ToTransactionalGatherer(g), expected, metricNames...)
 }
@@ -207,6 +218,9 @@ func GatherAndCompare(g prometheus.Gatherer, expected io.Reader, metricNames ...
 // it to an expected output read from the provided Reader in the Prometheus text
 // exposition format. If any metricNames are provided, only metrics with those
 // names are compared.
+//
+// NOTE: Be mindful of accidental discrepancies between expected and metricNames; metricNames filter
+// both expected and gathered metrics. See https://github.com/prometheus/client_golang/issues/1351.
 func TransactionalGatherAndCompare(g prometheus.TransactionalGatherer, expected io.Reader, metricNames ...string) error {
 	got, done, err := g.Gather()
 	defer done()
@@ -228,8 +242,17 @@ func CollectAndFormat(c prometheus.Collector, format expfmt.FormatType, metricNa
 	if err := reg.Register(c); err != nil {
 		return nil, fmt.Errorf("registering collector failed: %w", err)
 	}
+	return GatherAndFormat(reg, format, metricNames...)
+}
 
-	gotFiltered, err := reg.Gather()
+// GatherAndFormat gathers metrics from the provided Gatherer, optionally
+// filtered to metricNames, and returns them encoded in the given format.
+//
+// Unlike CollectAndFormat, this works with any Gatherer, so tests can inspect
+// metrics that were registered elsewhere (for example prometheus.DefaultGatherer)
+// without holding a reference to the Collector.
+func GatherAndFormat(g prometheus.Gatherer, format expfmt.FormatType, metricNames ...string) ([]byte, error) {
+	gotFiltered, err := g.Gather()
 	if err != nil {
 		return nil, fmt.Errorf("gathering metrics failed: %w", err)
 	}
@@ -250,7 +273,7 @@ func CollectAndFormat(c prometheus.Collector, format expfmt.FormatType, metricNa
 // convertReaderToMetricFamily would read from a io.Reader object and convert it to a slice of
 // dto.MetricFamily.
 func convertReaderToMetricFamily(reader io.Reader) ([]*dto.MetricFamily, error) {
-	var tp expfmt.TextParser
+	tp := expfmt.NewTextParser(model.UTF8Validation)
 	notNormalized, err := tp.TextToMetricFamilies(reader)
 	if err != nil {
 		return nil, fmt.Errorf("converting reader to metric families failed: %w", err)
@@ -279,15 +302,6 @@ func compareMetricFamilies(got, expected []*dto.MetricFamily, metricNames ...str
 	if metricNames != nil {
 		got = filterMetrics(got, metricNames)
 		expected = filterMetrics(expected, metricNames)
-		if len(metricNames) > len(got) {
-			var missingMetricNames []string
-			for _, name := range metricNames {
-				if ok := hasMetricByName(got, name); !ok {
-					missingMetricNames = append(missingMetricNames, name)
-				}
-			}
-			return fmt.Errorf("expected metric name(s) not found: %v", missingMetricNames)
-		}
 	}
 
 	return compare(got, expected)
@@ -328,13 +342,4 @@ func filterMetrics(metrics []*dto.MetricFamily, names []string) []*dto.MetricFam
 		}
 	}
 	return filtered
-}
-
-func hasMetricByName(metrics []*dto.MetricFamily, name string) bool {
-	for _, mf := range metrics {
-		if mf.GetName() == name {
-			return true
-		}
-	}
-	return false
 }

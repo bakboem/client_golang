@@ -99,7 +99,7 @@ type Bridge struct {
 // log.Logger from the standard library implements this interface, and it is
 // easy to implement by custom loggers, if they don't do so already anyway.
 type Logger interface {
-	Println(v ...interface{})
+	Println(v ...any)
 }
 
 // NewBridge returns a pointer to a new Bridge struct.
@@ -307,7 +307,13 @@ func replaceInvalidRune(c rune) rune {
 	if c == ' ' {
 		return '.'
 	}
-	if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == ':' || c == '-' || (c >= '0' && c <= '9')) {
+	// !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == ':' || c == '-' || (c >= '0' && c <= '9'))
+	if (c < 'a' || c > 'z') &&
+		(c < 'A' || c > 'Z') &&
+		c != '_' &&
+		c != ':' &&
+		c != '-' &&
+		(c < '0' || c > '9') {
 		return '_'
 	}
 	return c

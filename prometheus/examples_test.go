@@ -25,8 +25,10 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -308,9 +310,9 @@ func ExampleRegister() {
 
 	// Output:
 	// taskCounter registered.
-	// taskCounterVec not registered: a previously registered descriptor with the same fully-qualified name as Desc{fqName: "worker_pool_completed_tasks_total", help: "Total number of tasks completed.", constLabels: {}, variableLabels: {worker_id}} has different label names or a different help string
+	// taskCounterVec not registered: a previously registered descriptor with the same fully-qualified name as Desc{fqName: "worker_pool_completed_tasks_total", help: "Total number of tasks completed.", unit: "", constLabels: {}, variableLabels: {worker_id}} has different label names or a different help string
 	// taskCounter unregistered.
-	// taskCounterVec not registered: a previously registered descriptor with the same fully-qualified name as Desc{fqName: "worker_pool_completed_tasks_total", help: "Total number of tasks completed.", constLabels: {}, variableLabels: {worker_id}} has different label names or a different help string
+	// taskCounterVec not registered: a previously registered descriptor with the same fully-qualified name as Desc{fqName: "worker_pool_completed_tasks_total", help: "Total number of tasks completed.", unit: "", constLabels: {}, variableLabels: {worker_id}} has different label names or a different help string
 	// taskCounterVec registered.
 	// Worker initialization failed: inconsistent label cardinality: expected 1 label values but got 2 in []string{"42", "spurious arg"}
 	// notMyCounter is nil.
@@ -379,11 +381,12 @@ func ExampleSummaryVec() {
 }
 
 func ExampleNewConstSummary() {
-	desc := prometheus.NewDesc(
+	desc := prometheus.V2.NewDesc(
 		"http_request_duration_seconds",
 		"A summary of the HTTP request durations.",
-		[]string{"code", "method"},
+		prometheus.UnconstrainedLabels([]string{"code", "method"}),
 		prometheus.Labels{"owner": "example"},
+		prometheus.WithUnit("seconds"),
 	)
 
 	// Create a constant summary from values we got from a 3rd party telemetry system.
@@ -438,7 +441,8 @@ func ExampleHistogram() {
 	temps := prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name:    "pond_temperature_celsius",
 		Help:    "The temperature of the frog pond.", // Sorry, we can't measure how badly it smells.
-		Buckets: prometheus.LinearBuckets(20, 5, 5),  // 5 buckets, each 5 centigrade wide.
+		Unit:    "celsius",
+		Buckets: prometheus.LinearBuckets(20, 5, 5), // 5 buckets, each 5 centigrade wide.
 	})
 
 	// Simulate some observations.
@@ -459,11 +463,12 @@ func ExampleHistogram() {
 }
 
 func ExampleNewConstHistogram() {
-	desc := prometheus.NewDesc(
+	desc := prometheus.V2.NewDesc(
 		"http_request_duration_seconds",
 		"A histogram of the HTTP request durations.",
-		[]string{"code", "method"},
+		prometheus.UnconstrainedLabels([]string{"code", "method"}),
 		prometheus.Labels{"owner": "example"},
+		prometheus.WithUnit("seconds"),
 	)
 
 	// Create a constant histogram from values we got from a 3rd party telemetry system.
@@ -513,12 +518,13 @@ func ExampleNewConstHistogramWithCreatedTimestamp() {
 	// {"label":[{"name":"code","value":"200"},{"name":"method","value":"get"},{"name":"owner","value":"example"}],"histogram":{"sampleCount":"4711","sampleSum":403.34,"bucket":[{"cumulativeCount":"121","upperBound":25},{"cumulativeCount":"2403","upperBound":50},{"cumulativeCount":"3221","upperBound":100},{"cumulativeCount":"4233","upperBound":200}],"createdTimestamp":"2024-06-29T14:19:24.000000123Z"}}
 }
 
-func ExampleNewConstHistogram_WithExemplar() {
-	desc := prometheus.NewDesc(
+func ExampleNewConstHistogram_withExemplar() {
+	desc := prometheus.V2.NewDesc(
 		"http_request_duration_seconds",
 		"A histogram of the HTTP request durations.",
-		[]string{"code", "method"},
+		prometheus.UnconstrainedLabels([]string{"code", "method"}),
 		prometheus.Labels{"owner": "example"},
+		prometheus.WithUnit("seconds"),
 	)
 
 	// Create a constant histogram from values we got from a 3rd party telemetry system.
@@ -583,7 +589,7 @@ func ExampleGatherers() {
 	temp.WithLabelValues("outside").Set(273.14)
 	temp.WithLabelValues("inside").Set(298.44)
 
-	var parser expfmt.TextParser
+	parser := expfmt.NewTextParser(model.UTF8Validation)
 
 	text := `
 # TYPE humidity_percent gauge
@@ -684,10 +690,11 @@ temperature_kelvin 4.5
 }
 
 func ExampleNewMetricWithTimestamp() {
-	desc := prometheus.NewDesc(
+	desc := prometheus.V2.NewDesc(
 		"temperature_kelvin",
 		"Current temperature in Kelvin.",
-		nil, nil,
+		prometheus.UnconstrainedLabels(nil), nil,
+		prometheus.WithUnit("kelvin"),
 	)
 
 	// Create a constant gauge from values we got from an external
@@ -717,10 +724,11 @@ func ExampleNewConstMetricWithCreatedTimestamp() {
 	// Here we have a metric that is reported by an external system.
 	// Besides providing the value, the external system also provides the
 	// timestamp when the metric was created.
-	desc := prometheus.NewDesc(
+	desc := prometheus.V2.NewDesc(
 		"time_since_epoch_seconds",
 		"Current epoch time in seconds.",
-		nil, nil,
+		prometheus.UnconstrainedLabels(nil), nil,
+		prometheus.WithUnit("seconds"),
 	)
 
 	timeSinceEpochReportedByExternalSystem := time.Date(2009, time.November, 10, 23, 0, 0, 12345678, time.UTC)
@@ -735,4 +743,131 @@ func ExampleNewConstMetricWithCreatedTimestamp() {
 
 	// Output:
 	// {"counter":{"value":1257894000,"createdTimestamp":"1970-01-01T00:00:00Z"}}
+}
+
+// Using CollectorFunc that registers the metric info for the HTTP requests.
+func ExampleCollectorFunc() {
+	desc := prometheus.NewDesc(
+		"http_requests_info",
+		"Information about the received HTTP requests.",
+		[]string{"code", "method"},
+		nil,
+	)
+
+	// Example 1: 42 GET requests with 200 OK status code.
+	collector := prometheus.CollectorFunc(func(ch chan<- prometheus.Metric) {
+		ch <- prometheus.MustNewConstMetric(
+			desc,
+			prometheus.CounterValue, // Metric type: Counter
+			42,                      // Value
+			"200",                   // Label value: HTTP status code
+			"GET",                   // Label value: HTTP method
+		)
+
+		// Example 2: 15 POST requests with 404 Not Found status code.
+		ch <- prometheus.MustNewConstMetric(
+			desc,
+			prometheus.CounterValue,
+			15,
+			"404",
+			"POST",
+		)
+	})
+
+	prometheus.MustRegister(collector)
+
+	// Just for demonstration, let's check the state of the metric by registering
+	// it with a custom registry and then let it collect the metrics.
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(collector)
+
+	metricFamilies, err := reg.Gather()
+	if err != nil || len(metricFamilies) != 1 {
+		panic("unexpected behavior of custom test registry")
+	}
+
+	fmt.Println(toNormalizedJSON(sanitizeMetricFamily(metricFamilies[0])))
+
+	// Output:
+	// {"name":"http_requests_info","help":"Information about the received HTTP requests.","type":"COUNTER","metric":[{"label":[{"name":"code","value":"200"},{"name":"method","value":"GET"}],"counter":{"value":42}},{"label":[{"name":"code","value":"404"},{"name":"method","value":"POST"}],"counter":{"value":15}}]}
+}
+
+// Using WrapCollectorWith to un-register metrics registered by a third party lib.
+// newThirdPartyLibFoo illustrates a constructor from a third-party lib that does
+// not expose any way to un-register metrics.
+func ExampleWrapCollectorWith() {
+	reg := prometheus.NewRegistry()
+
+	// We want to create two instances of thirdPartyLibFoo, each one wrapped with
+	// its "instance" label.
+	firstReg := prometheus.NewRegistry()
+	_ = newThirdPartyLibFoo(firstReg)
+	firstCollector := prometheus.WrapCollectorWith(prometheus.Labels{"instance": "first"}, firstReg)
+	reg.MustRegister(firstCollector)
+
+	secondReg := prometheus.NewRegistry()
+	_ = newThirdPartyLibFoo(secondReg)
+	secondCollector := prometheus.WrapCollectorWith(prometheus.Labels{"instance": "second"}, secondReg)
+	reg.MustRegister(secondCollector)
+
+	// So far we have illustrated that we can create two instances of thirdPartyLibFoo,
+	// wrapping each one's metrics with some const label.
+	// This is something we could've achieved by doing:
+	// newThirdPartyLibFoo(prometheus.WrapRegistererWith(prometheus.Labels{"instance": "first"}, reg))
+	metricFamilies, err := reg.Gather()
+	if err != nil {
+		panic("unexpected behavior of registry")
+	}
+	fmt.Println("Both instances:")
+	fmt.Println(toNormalizedJSON(sanitizeMetricFamily(metricFamilies[0])))
+
+	// Now we want to unregister first Foo's metrics, and then register them again.
+	// This is not possible by passing a wrapped Registerer to newThirdPartyLibFoo,
+	// because we have already lost track of the registered Collectors,
+	// however since we've collected Foo's metrics in it's own Registry, and we have registered that
+	// as a specific Collector, we can now de-register them:
+	unregistered := reg.Unregister(firstCollector)
+	if !unregistered {
+		panic("unexpected behavior of registry")
+	}
+
+	metricFamilies, err = reg.Gather()
+	if err != nil {
+		panic("unexpected behavior of registry")
+	}
+	fmt.Println("First unregistered:")
+	fmt.Println(toNormalizedJSON(sanitizeMetricFamily(metricFamilies[0])))
+
+	// Now we can create another instance of Foo with {instance: "first"} label again.
+	firstRegAgain := prometheus.NewRegistry()
+	_ = newThirdPartyLibFoo(firstRegAgain)
+	firstCollectorAgain := prometheus.WrapCollectorWith(prometheus.Labels{"instance": "first"}, firstRegAgain)
+	reg.MustRegister(firstCollectorAgain)
+
+	metricFamilies, err = reg.Gather()
+	if err != nil {
+		panic("unexpected behavior of registry")
+	}
+	fmt.Println("Both again:")
+	fmt.Println(toNormalizedJSON(sanitizeMetricFamily(metricFamilies[0])))
+
+	// Output:
+	// Both instances:
+	// {"name":"foo","help":"Registered forever.","type":"GAUGE","metric":[{"label":[{"name":"instance","value":"first"}],"gauge":{"value":1}},{"label":[{"name":"instance","value":"second"}],"gauge":{"value":1}}]}
+	// First unregistered:
+	// {"name":"foo","help":"Registered forever.","type":"GAUGE","metric":[{"label":[{"name":"instance","value":"second"}],"gauge":{"value":1}}]}
+	// Both again:
+	// {"name":"foo","help":"Registered forever.","type":"GAUGE","metric":[{"label":[{"name":"instance","value":"first"}],"gauge":{"value":1}},{"label":[{"name":"instance","value":"second"}],"gauge":{"value":1}}]}
+}
+
+func newThirdPartyLibFoo(reg prometheus.Registerer) struct{} {
+	foo := struct{}{}
+	// Register the metrics of the third party lib.
+	c := promauto.With(reg).NewGauge(prometheus.GaugeOpts{
+		Name: "foo",
+		Help: "Registered forever.",
+	})
+	c.Set(1)
+	return foo
 }
